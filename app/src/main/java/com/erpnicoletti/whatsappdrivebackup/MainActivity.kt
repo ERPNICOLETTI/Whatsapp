@@ -11,7 +11,6 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.documentfile.provider.DocumentFile
 import java.io.FileNotFoundException
 import java.text.SimpleDateFormat
@@ -19,6 +18,11 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : Activity() {
+
+    companion object {
+        private const val REQ_SOURCE = 1001
+        private const val REQ_DESTINATION = 1002
+    }
 
     private lateinit var sourceText: TextView
     private lateinit var destinationText: TextView
@@ -30,24 +34,6 @@ class MainActivity : Activity() {
     private var destinationUri: Uri? = null
 
     private val prefs by lazy { getSharedPreferences("backup_prefs", MODE_PRIVATE) }
-
-    private val sourcePicker =
-        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            uri ?: return@registerForActivityResult
-            persistTreePermission(uri)
-            sourceUri = uri
-            prefs.edit().putString("source_uri", uri.toString()).apply()
-            updateUi()
-        }
-
-    private val destinationPicker =
-        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            uri ?: return@registerForActivityResult
-            persistTreePermission(uri)
-            destinationUri = uri
-            prefs.edit().putString("destination_uri", uri.toString()).apply()
-            updateUi()
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,14 +61,14 @@ class MainActivity : Activity() {
 
         val sourceButton = Button(this).apply {
             text = "1. Elegir carpeta WhatsApp/Databases"
-            setOnClickListener { sourcePicker.launch(sourceUri) }
+            setOnClickListener { openTreePicker(REQ_SOURCE, sourceUri) }
         }
 
         sourceText = TextView(this).apply { setPadding(0, 8, 0, 24) }
 
         val destinationButton = Button(this).apply {
             text = "2. Elegir carpeta destino en Drive"
-            setOnClickListener { destinationPicker.launch(destinationUri) }
+            setOnClickListener { openTreePicker(REQ_DESTINATION, destinationUri) }
         }
 
         destinationText = TextView(this).apply { setPadding(0, 8, 0, 24) }
@@ -117,13 +103,52 @@ class MainActivity : Activity() {
         updateUi()
     }
 
-    private fun persistTreePermission(uri: Uri) {
-        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
-            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    private fun openTreePicker(requestCode: Int, initialUri: Uri?) {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+            )
+            if (initialUri != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                putExtra("android.provider.extra.INITIAL_URI", initialUri)
+            }
+        }
+        startActivityForResult(intent, requestCode)
+    }
+
+    @Deprecated("Deprecated in Android API but intentionally used to keep this APK dependency-light")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
+
+        val uri = data?.data ?: return
+        persistTreePermission(uri, data.flags)
+
+        when (requestCode) {
+            REQ_SOURCE -> {
+                sourceUri = uri
+                prefs.edit().putString("source_uri", uri.toString()).apply()
+            }
+            REQ_DESTINATION -> {
+                destinationUri = uri
+                prefs.edit().putString("destination_uri", uri.toString()).apply()
+            }
+        }
+
+        updateUi()
+    }
+
+    private fun persistTreePermission(uri: Uri, returnedFlags: Int) {
+        val takeFlags = returnedFlags and (
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
 
         try {
-            contentResolver.takePersistableUriPermission(uri, flags)
-        } catch (_: SecurityException) {
+            contentResolver.takePersistableUriPermission(uri, takeFlags)
+        } catch (_: Exception) {
             try {
                 contentResolver.takePersistableUriPermission(
                     uri,
@@ -174,8 +199,8 @@ class MainActivity : Activity() {
                 file.isFile &&
                     (
                         file.name?.startsWith("msgstore") == true ||
-                        file.name == "wa.db"
-                    )
+                            file.name == "wa.db"
+                        )
             }
             .sortedByDescending { file -> file.lastModified() }
 
@@ -210,14 +235,12 @@ class MainActivity : Activity() {
                     if (output == null) throw FileNotFoundException("Destino " + name)
 
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 8)
-
                     while (true) {
                         val read = input.read(buffer)
                         if (read <= 0) break
                         output.write(buffer, 0, read)
                         bytes += read
                     }
-
                     output.flush()
                 }
             }
@@ -226,7 +249,6 @@ class MainActivity : Activity() {
         }
 
         val mb = bytes / 1024.0 / 1024.0
-
         return String.format(
             Locale.US,
             "Listo. Copiados %d archivo(s), %.1f MB, en %s.\n\nEse respaldo contiene el historial de chats cifrado de WhatsApp.",
